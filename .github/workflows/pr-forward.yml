@@ -2,19 +2,27 @@ name: Forward PR events to pr-tracker
 
 # Thin forwarder (Phase 1). Copy this into a tracked repo as
 # .github/workflows/pr-forward.yml. It fires a repository_dispatch at
-# duckdblabs/pr-tracker for each PR lifecycle event; all real logic lives in
-# pr-tracker's ingest.yml.
+# duckdblabs/pr-tracker for each event below; all real logic lives in
+# pr-tracker's ingest.yml, which routes on the `event` field of the payload.
+#
+# EVENT MATRIX (extend here — the payload envelope is the contract):
+#   pull_request_target  opened / reopened / ready_for_review /
+#                        converted_to_draft / closed   -> tracking issue lifecycle
+#   pull_request_review  submitted                      -> "review happened" comment
+#   (future) workflow_run / status / check_suite        -> CI Passing/Failure labels
+# To add an event: add the trigger, surface its fields as env below, include them
+# in the jq payload, and add a branch in pr_tracker.ingest. No rewrite needed.
 #
 # SECURITY — this is the public-repo trust boundary, read before editing:
-#   * pull_request_target (NOT pull_request): fork-triggered pull_request runs
-#     get a read-only token and NO secrets, so they cannot authenticate the
-#     dispatch. pull_request_target runs in the trusted base context with
-#     secrets.
+#   * pull_request_target / pull_request_review (NOT pull_request): both run in
+#     the trusted base context WITH secrets, so they can authenticate the
+#     dispatch. A fork-triggered pull_request gets a read-only token and no
+#     secrets and could not.
 #   * We do NOT checkout or run any PR-head (fork-supplied) code.
-#   * We send ONLY coordinates (repo, PR number, action) — never title/body/
-#     branch. The payload is built with jq from env vars; attacker-controlled
-#     fields are never interpolated into a run: script via ${{ }} (script
-#     injection, not checkout, is the likeliest exfil path).
+#   * We send coordinates + a few GitHub-supplied review fields (login / state
+#     enum / URL) — never PR title/body/branch. The payload is built with jq from
+#     env vars; nothing attacker-influenced is interpolated into a run: script
+#     via ${{ }} (script injection, not checkout, is the likeliest exfil path).
 #
 # SETUP (per tracked repo):
 #   Add a secret PR_TRACKER_DISPATCH_TOKEN = a fine-grained PAT scoped to
@@ -24,6 +32,8 @@ name: Forward PR events to pr-tracker
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   contents: read
@@ -35,13 +45,25 @@ jobs:
       - name: Dispatch to pr-tracker
         env:
           GH_TOKEN: ${{ secrets.PR_TRACKER_DISPATCH_TOKEN }}
+          EVENT_KIND: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_ACTION: ${{ github.event.action }}
+          # Present only on pull_request_review; empty otherwise.
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          REVIEW_URL: ${{ github.event.review.html_url }}
         run: |
           jq -n \
+            --arg event "$EVENT_KIND" \
+            --arg action "$EVENT_ACTION" \
             --arg repo "$REPO" \
             --argjson number "$PR_NUMBER" \
-            --arg action "$EVENT_ACTION" \
-            '{event_type: "pr-event", client_payload: {repo: $repo, number: $number, action: $action}}' \
+            --arg review_state "$REVIEW_STATE" \
+            --arg reviewer "$REVIEWER" \
+            --arg review_url "$REVIEW_URL" \
+            '{event_type: "pr-event", client_payload: {
+               event: $event, action: $action, repo: $repo, number: $number,
+               review_state: $review_state, reviewer: $reviewer, review_url: $review_url
+             }}' \
           | gh api -X POST /repos/duckdblabs/pr-tracker/dispatches --input -
