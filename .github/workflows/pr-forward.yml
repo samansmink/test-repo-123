@@ -1,0 +1,47 @@
+name: Forward PR events to pr-tracker
+
+# Thin forwarder (Phase 1). Copy this into a tracked repo as
+# .github/workflows/pr-forward.yml. It fires a repository_dispatch at
+# duckdblabs/pr-tracker for each PR lifecycle event; all real logic lives in
+# pr-tracker's ingest.yml.
+#
+# SECURITY — this is the public-repo trust boundary, read before editing:
+#   * pull_request_target (NOT pull_request): fork-triggered pull_request runs
+#     get a read-only token and NO secrets, so they cannot authenticate the
+#     dispatch. pull_request_target runs in the trusted base context with
+#     secrets.
+#   * We do NOT checkout or run any PR-head (fork-supplied) code.
+#   * We send ONLY coordinates (repo, PR number, action) — never title/body/
+#     branch. The payload is built with jq from env vars; attacker-controlled
+#     fields are never interpolated into a run: script via ${{ }} (script
+#     injection, not checkout, is the likeliest exfil path).
+#
+# SETUP (per tracked repo):
+#   Add a secret PR_TRACKER_DISPATCH_TOKEN = a fine-grained PAT scoped to
+#   duckdblabs/pr-tracker ONLY, with Contents: write (the minimum that
+#   repository_dispatch requires). Nothing else — keep blast radius tiny.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to pr-tracker
+        env:
+          GH_TOKEN: ${{ secrets.PR_TRACKER_DISPATCH_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          jq -n \
+            --arg repo "$REPO" \
+            --argjson number "$PR_NUMBER" \
+            --arg action "$EVENT_ACTION" \
+            '{event_type: "pr-event", client_payload: {repo: $repo, number: $number, action: $action}}' \
+          | gh api -X POST /repos/duckdblabs/pr-tracker/dispatches --input -
