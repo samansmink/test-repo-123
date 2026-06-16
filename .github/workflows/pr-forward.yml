@@ -53,6 +53,7 @@ jobs:
           REVIEW_STATE: ${{ github.event.review.state }}
           REVIEWER: ${{ github.event.review.user.login }}
           REVIEW_URL: ${{ github.event.review.html_url }}
+          REVIEW_ID: ${{ github.event.review.id }}
         run: |
           jq -n \
             --arg event "$EVENT_KIND" \
@@ -62,8 +63,10 @@ jobs:
             --arg review_state "$REVIEW_STATE" \
             --arg reviewer "$REVIEWER" \
             --arg review_url "$REVIEW_URL" \
+            --arg review_id "$REVIEW_ID" \
             '{event_type: "pr-event", client_payload: {
                event: $event, action: $action, repo: $repo, number: $number,
-               review_state: $review_state, reviewer: $reviewer, review_url: $review_url
+               review_state: $review_state, reviewer: $reviewer, review_url: $review_url,
+               review_id: $review_id
              }}' \
           | gh api -X POST /repos/duckdblabs/pr-tracker/dispatches --input -
